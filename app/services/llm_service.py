@@ -49,3 +49,41 @@ class LLMService:
                             yield token
                         if data.get("done", False):
                             break
+
+    async def chat(self, messages: list[dict[str, str]]) -> str:
+        """多轮对话，非流式，返回完整文本。"""
+        url = f"{self._base_url}/api/chat"
+        payload = {
+            "model": self._model,
+            "messages": messages,
+            "stream": False,
+        }
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            response = await client.post(url, json=payload)
+            response.raise_for_status()
+            data = response.json()
+        return data.get("message", {}).get("content", "")
+
+    async def chat_stream(
+        self, messages: list[dict[str, str]]
+    ) -> AsyncGenerator[str, None]:
+        """多轮对话，流式，逐 token yield。"""
+        import json
+
+        url = f"{self._base_url}/api/chat"
+        payload = {
+            "model": self._model,
+            "messages": messages,
+            "stream": True,
+        }
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            async with client.stream("POST", url, json=payload) as response:
+                response.raise_for_status()
+                async for line in response.aiter_lines():
+                    if line.strip():
+                        data = json.loads(line)
+                        token = data.get("message", {}).get("content", "")
+                        if token:
+                            yield token
+                        if data.get("done", False):
+                            break

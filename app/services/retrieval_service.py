@@ -10,8 +10,11 @@ from app.core.vectorstore import VectorStore
 from app.services.llm_service import LLMService
 
 _REWRITE_SYSTEM = (
-    "你是一个查询优化助手。将用户的问题改写为更适合向量检索的表达："
-    "去除口语化、补全隐含主语、拆解复合问题。只输出改写后的问题，不要解释。"
+    "你是一个查询优化助手。结合对话历史，将用户的最新问题改写为独立、完整、适合向量检索的查询语句。"
+    "规则：1.解析代词指代（如"它"、"这个"、"上面提到的"），替换为具体实体名称；"
+    "2.补全省略的主语或宾语；3.去除口语化，使用书面语；"
+    "4.如果问题已经独立完整，直接返回原问题。"
+    "只输出改写后的问题，不要解释，不要加任何前缀。"
 )
 
 _reranker_instance: FlagReranker | None = None
@@ -35,10 +38,26 @@ class RetrievalService:
         self._vectorstore = vectorstore
         self._llm_service = llm_service
 
-    async def rewrite_query(self, question: str) -> str:
-        rewritten = await self._llm_service.generate(
-            prompt=question, system=_REWRITE_SYSTEM
-        )
+    async def rewrite_query(
+        self,
+        question: str,
+        history: list[dict[str, str]] | None = None,
+    ) -> str:
+        if not history:
+            rewritten = await self._llm_service.generate(
+                prompt=question, system=_REWRITE_SYSTEM
+            )
+            return rewritten.strip() or question
+
+        messages: list[dict[str, str]] = [
+            {"role": "system", "content": _REWRITE_SYSTEM}
+        ]
+        messages.extend(history[-10:])
+        messages.append({
+            "role": "user",
+            "content": f"请结合以上对话历史，将下面这个问题改写为独立的检索查询：\n{question}",
+        })
+        rewritten = await self._llm_service.chat(messages)
         return rewritten.strip() or question
 
     def rerank(
@@ -66,8 +85,9 @@ class RetrievalService:
         self,
         question: str,
         collection_name: str = "default",
+        history: list[dict[str, str]] | None = None,
     ) -> tuple[str, list[dict[str, Any]]]:
-        rewritten = await self.rewrite_query(question)
+        rewritten = await self.rewrite_query(question, history=history)
 
         embeddings = await get_embeddings(
             [rewritten],

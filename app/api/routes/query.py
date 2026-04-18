@@ -8,7 +8,7 @@ from fastapi.responses import StreamingResponse
 
 from app.config import Settings, get_settings
 from app.core.vectorstore import VectorStore
-from app.models import QueryRequest, QueryResponse, SourceReference
+from app.models import ChatMessage, QueryRequest, QueryResponse, SourceReference
 from app.services.llm_service import LLMService
 from app.services.retrieval_service import RetrievalService
 
@@ -20,11 +20,22 @@ _ANSWER_SYSTEM = (
 )
 
 
-def _build_prompt(question: str, context_chunks: list[dict]) -> str:
+def _build_answer_messages(
+    question: str,
+    context_chunks: list[dict],
+    history: list[ChatMessage],
+) -> list[dict[str, str]]:
+    messages: list[dict[str, str]] = [{"role": "system", "content": _ANSWER_SYSTEM}]
+    for msg in history[-10:]:
+        messages.append({"role": msg.role, "content": msg.content})
     context = "\n\n".join(
         f"[文档 {i+1}] {c['document']}" for i, c in enumerate(context_chunks)
     )
-    return f"参考文档：\n{context}\n\n用户问题：{question}"
+    messages.append({
+        "role": "user",
+        "content": f"参考文档：\n{context}\n\n用户问题：{question}",
+    })
+    return messages
 
 
 def _get_retrieval_service(settings: Settings = Depends(get_settings)) -> RetrievalService:
@@ -39,12 +50,15 @@ async def query(
     service: RetrievalService = Depends(_get_retrieval_service),
     settings: Settings = Depends(get_settings),
 ) -> QueryResponse:
+    history_dicts = [{"role": m.role, "content": m.content} for m in request.history]
     rewritten, sources = await service.retrieve(
-        request.question, collection_name=request.collection_name
+        request.question,
+        collection_name=request.collection_name,
+        history=history_dicts,
     )
-    prompt = _build_prompt(request.question, sources)
+    messages = _build_answer_messages(request.question, sources, request.history)
     llm = LLMService(base_url=settings.ollama_base_url, model=settings.ollama_model)
-    answer = await llm.generate(prompt=prompt, system=_ANSWER_SYSTEM)
+    answer = await llm.chat(messages)
 
     source_refs = [
         SourceReference(
@@ -64,10 +78,13 @@ async def query_stream(
     service: RetrievalService = Depends(_get_retrieval_service),
     settings: Settings = Depends(get_settings),
 ) -> StreamingResponse:
+    history_dicts = [{"role": m.role, "content": m.content} for m in request.history]
     rewritten, sources = await service.retrieve(
-        request.question, collection_name=request.collection_name
+        request.question,
+        collection_name=request.collection_name,
+        history=history_dicts,
     )
-    prompt = _build_prompt(request.question, sources)
+    messages = _build_answer_messages(request.question, sources, request.history)
 
     source_refs = [
         {
@@ -81,7 +98,7 @@ async def query_stream(
     llm = LLMService(base_url=settings.ollama_base_url, model=settings.ollama_model)
 
     async def event_generator() -> AsyncGenerator[str, None]:
-        async for token in llm.generate_stream(prompt=prompt, system=_ANSWER_SYSTEM):
+        async for token in llm.chat_stream(messages):
             payload = json.dumps({"type": "token", "content": token}, ensure_ascii=False)
             yield f"data: {payload}\n\n"
 
